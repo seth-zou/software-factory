@@ -1,0 +1,40 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color: #211f1c; background: #fbf5ea; font-synthesis: none; }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: #fbf5ea; }
+button, input { font: inherit; }
+::selection { background: #ffddd8; color: #a9231a; }
+
+/* 老人模式全局基础：放大字号约 1.25 倍 */
+.elderly { font-size: 125%; }
+
+/* 老人模式：增强对比度，提升半透明文字不透明度至 WCAG AA（≥ 4.5:1） */
+.elderly .text-rice-200\/40 { color: rgb(243 230 208 / 0.8); }
+.elderly .text-rice-200\/60 { color: rgb(243 230 208 / 0.9); }
+.elderly .text-white\/30 { color: rgb(255 255 255 / 0.75); }
+.elderly .text-white\/40 { color: rgb(255 255 255 / 0.8); }
+
+/* 老人模式：主要交互元素触控区域 ≥ 44px */
+.elderly button { min-height: 2.2rem; }
+
+/* 界面状态切换平滑过渡 */
+html { transition: background-color 250ms ease, color 250ms ease, font-size 250ms ease; }
+html * {
+  transition-property: background-color, border-color, color, fill, stroke, font-size;
+  transition-duration: 250ms;
+  transition-timing-function: ease;
+}
+
+@layer utilities {
+  .safe-bottom { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+  .paper-noise {
+    background-image: radial-gradient(rgba(170, 110, 60, .08) .7px, transparent .7px);
+    background-size: 12px 12px;
+  }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+}
