@@ -118,6 +118,63 @@ class SnakeGameControllerTest {
     }
 
     @Test
+    fun gameOverPersistsCompletedRoundInRankedHistory() {
+        var persistedHistory = emptyList<ScoreEntry>()
+        val previousEntry = ScoreEntry(
+            score = 30,
+            speedProfile = SpeedProfile.Dynamic,
+            completedAtMillis = 900L,
+            sequence = 7L,
+        )
+        val controller = SnakeGameController(
+            bestScore = 0,
+            scoreHistory = listOf(previousEntry),
+            persistScoreHistory = { persistedHistory = it },
+            completedAtProvider = { 1000L },
+            nextEnergyProvider = { _, _ -> Point(0, 0) },
+        )
+        controller.start()
+
+        assertEquals(listOf(previousEntry), controller.state.scoreHistory)
+
+        repeat(14) {
+            controller.tick()
+        }
+
+        assertEquals(RoundState.GameOver, controller.state.roundState)
+        assertEquals(20, controller.state.score)
+        assertEquals(2, controller.state.scoreHistory.size)
+        assertEquals(previousEntry, controller.state.scoreHistory.first())
+        assertEquals(20, controller.state.scoreHistory[1].score)
+        assertEquals(SpeedProfile.Comfort, controller.state.scoreHistory[1].speedProfile)
+        assertEquals(1000L, controller.state.scoreHistory[1].completedAtMillis)
+        assertEquals(controller.state.scoreHistory, persistedHistory)
+    }
+
+    @Test
+    fun scoreHistoryCodecSkipsInvalidRowsAndSortsDeterministically() {
+        val rawHistory = listOf(
+            "20|Eco|100|1",
+            "broken",
+            "40|Dynamic|90|2",
+            "-1|Comfort|120|3",
+            "40|Comfort|110|4",
+            "10|Missing|130|5",
+        ).joinToString("\n")
+
+        val history = decodeScoreHistory(rawHistory)
+
+        assertEquals(3, history.size)
+        assertEquals(40, history[0].score)
+        assertEquals(SpeedProfile.Comfort, history[0].speedProfile)
+        assertEquals(40, history[1].score)
+        assertEquals(SpeedProfile.Dynamic, history[1].speedProfile)
+        assertEquals(20, history[2].score)
+        assertEquals(SpeedProfile.Eco, history[2].speedProfile)
+        assertEquals(history, decodeScoreHistory(encodeScoreHistory(history)))
+    }
+
+    @Test
     fun drivingStateIgnoresGameActions() {
         val controller = SnakeGameController()
         controller.setVehicleState(VehicleState.Driving)

@@ -2,6 +2,9 @@ package com.bmwelectric.snake.game
 
 const val BOARD_SIZE = 20
 const val BEST_SCORE_KEY = "bmwSnakeBestScore"
+const val SCORE_HISTORY_KEY = "bmwSnakeScoreHistory"
+
+private const val SCORE_HISTORY_LIMIT = 10
 
 enum class VehicleState {
     Parked,
@@ -31,12 +34,20 @@ enum class SpeedProfile(val label: String, val speedValue: String, val tickMilli
 
 data class Point(val x: Int, val y: Int)
 
+data class ScoreEntry(
+    val score: Int,
+    val speedProfile: SpeedProfile,
+    val completedAtMillis: Long,
+    val sequence: Long,
+)
+
 data class SnakeGameState(
     val vehicleState: VehicleState = VehicleState.Parked,
     val roundState: RoundState = RoundState.Ready,
     val speedProfile: SpeedProfile = SpeedProfile.Comfort,
     val score: Int = 0,
     val bestScore: Int = 0,
+    val scoreHistory: List<ScoreEntry> = emptyList(),
     val direction: Direction = Direction.Right,
     val nextDirection: Direction = Direction.Right,
     val snake: List<Point> = initialSnake(),
@@ -55,10 +66,16 @@ data class SnakeGameState(
 
 class SnakeGameController(
     bestScore: Int = 0,
+    scoreHistory: List<ScoreEntry> = emptyList(),
     private val persistBestScore: (Int) -> Unit = {},
+    private val persistScoreHistory: (List<ScoreEntry>) -> Unit = {},
+    private val completedAtProvider: () -> Long = { System.currentTimeMillis() },
     private val nextEnergyProvider: (List<Point>, Point) -> Point = ::nextEnergyCell,
 ) {
-    var state: SnakeGameState = SnakeGameState(bestScore = bestScore.coerceAtLeast(0))
+    var state: SnakeGameState = SnakeGameState(
+        bestScore = maxOf(bestScore, scoreHistory.maxOfOrNull { it.score } ?: 0).coerceAtLeast(0),
+        scoreHistory = rankScoreHistory(scoreHistory),
+    )
         private set
 
     fun setVehicleState(vehicleState: VehicleState) {
@@ -71,6 +88,7 @@ class SnakeGameController(
             VehicleState.Parked -> if (state.roundState == RoundState.DrivingLocked || state.vehicleState == VehicleState.Driving) {
                 readyState(
                     bestScore = state.bestScore,
+                    scoreHistory = state.scoreHistory,
                     speedProfile = state.speedProfile,
                     announcement = "Parked. Game controls available.",
                 )
@@ -90,6 +108,7 @@ class SnakeGameController(
         if (!state.canStart) return
         state = newRoundState(
             bestScore = state.bestScore,
+            scoreHistory = state.scoreHistory,
             speedProfile = state.speedProfile,
             announcement = "Snake started.",
         )
@@ -99,6 +118,7 @@ class SnakeGameController(
         if (!state.canRestart) return
         state = newRoundState(
             bestScore = state.bestScore,
+            scoreHistory = state.scoreHistory,
             speedProfile = state.speedProfile,
             announcement = "Snake restarted.",
         )
@@ -125,6 +145,7 @@ class SnakeGameController(
         } else {
             readyState(
                 bestScore = state.bestScore,
+                scoreHistory = state.scoreHistory,
                 speedProfile = state.speedProfile,
                 announcement = "Snake exited.",
             )
@@ -146,9 +167,19 @@ class SnakeGameController(
         val hitBody = head in bodyWithoutTail
 
         if (hitWall || hitBody) {
+            val completedHistory = rankScoreHistory(
+                state.scoreHistory + ScoreEntry(
+                    score = state.score.coerceAtLeast(0),
+                    speedProfile = state.speedProfile,
+                    completedAtMillis = completedAtProvider().coerceAtLeast(0L),
+                    sequence = (state.scoreHistory.maxOfOrNull { it.sequence } ?: 0L) + 1L,
+                ),
+            )
+            persistScoreHistory(completedHistory)
             state = state.copy(
                 roundState = RoundState.GameOver,
                 direction = direction,
+                scoreHistory = completedHistory,
                 statusAnnouncement = "Collision. Game over. Score ${state.score}. Best ${state.bestScore}.",
             )
             return
@@ -176,6 +207,7 @@ class SnakeGameController(
 
 private fun readyState(
     bestScore: Int,
+    scoreHistory: List<ScoreEntry>,
     speedProfile: SpeedProfile,
     announcement: String,
 ): SnakeGameState = SnakeGameState(
@@ -183,11 +215,13 @@ private fun readyState(
     roundState = RoundState.Ready,
     speedProfile = speedProfile,
     bestScore = bestScore,
+    scoreHistory = scoreHistory,
     statusAnnouncement = announcement,
 )
 
 private fun newRoundState(
     bestScore: Int,
+    scoreHistory: List<ScoreEntry>,
     speedProfile: SpeedProfile,
     announcement: String,
 ): SnakeGameState = SnakeGameState(
@@ -195,6 +229,7 @@ private fun newRoundState(
     roundState = RoundState.Playing,
     speedProfile = speedProfile,
     bestScore = bestScore,
+    scoreHistory = scoreHistory,
     statusAnnouncement = announcement,
 )
 
@@ -231,3 +266,38 @@ private fun nextEnergyCell(snake: List<Point>, current: Point): Point {
 }
 
 private fun Int.floorMod(divisor: Int): Int = ((this % divisor) + divisor) % divisor
+
+fun rankScoreHistory(history: List<ScoreEntry>): List<ScoreEntry> = history
+    .filter { it.score >= 0 && it.completedAtMillis >= 0L && it.sequence >= 0L }
+    .sortedWith(
+        compareByDescending<ScoreEntry> { it.score }
+            .thenByDescending { it.completedAtMillis }
+            .thenByDescending { it.sequence },
+    )
+    .take(SCORE_HISTORY_LIMIT)
+
+fun encodeScoreHistory(history: List<ScoreEntry>): String = rankScoreHistory(history)
+    .joinToString(separator = "\n") { entry ->
+        "${entry.score}|${entry.speedProfile.name}|${entry.completedAtMillis}|${entry.sequence}"
+    }
+
+fun decodeScoreHistory(rawHistory: String?): List<ScoreEntry> {
+    if (rawHistory.isNullOrBlank()) return emptyList()
+
+    return rankScoreHistory(
+        rawHistory.lineSequence().mapNotNull { line ->
+            val parts = line.split('|')
+            if (parts.size != 4) return@mapNotNull null
+            val score = parts[0].toIntOrNull()?.takeIf { it >= 0 } ?: return@mapNotNull null
+            val speedProfile = runCatching { SpeedProfile.valueOf(parts[1]) }.getOrNull() ?: return@mapNotNull null
+            val completedAtMillis = parts[2].toLongOrNull()?.takeIf { it >= 0L } ?: return@mapNotNull null
+            val sequence = parts[3].toLongOrNull()?.takeIf { it >= 0L } ?: return@mapNotNull null
+            ScoreEntry(
+                score = score,
+                speedProfile = speedProfile,
+                completedAtMillis = completedAtMillis,
+                sequence = sequence,
+            )
+        }.toList(),
+    )
+}

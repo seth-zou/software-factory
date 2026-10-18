@@ -22,6 +22,8 @@ class SnakeAutomotiveUiTest {
         composeRule.onNodeWithText("Snake Parked Mode").assertIsDisplayed()
         composeRule.onNodeWithText("Parked. Game controls available.").assertIsDisplayed()
         composeRule.onNodeWithText("Snake is ready").assertIsDisplayed()
+        composeRule.onNodeWithText("Leaderboard").assertIsDisplayed()
+        composeRule.onNodeWithTag("leaderboard-empty").assertIsDisplayed()
         composeRule.onNodeWithTag("start").assertIsDisplayed()
         composeRule.onNodeWithTag("snake-board").assertIsDisplayed()
     }
