@@ -3,6 +3,7 @@ package com.bmwelectric.snake
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -49,6 +50,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -80,6 +82,10 @@ import com.bmwelectric.snake.game.decodeScoreHistory
 import com.bmwelectric.snake.game.encodeScoreHistory
 import com.bmwelectric.snake.game.leaderboardRank
 import com.bmwelectric.snake.game.nextEnergyCell
+import com.bmwelectric.snake.theme.THEME_PREFS_NAME
+import com.bmwelectric.snake.theme.THEME_PREFERENCE_KEY
+import com.bmwelectric.snake.theme.ThemeMode
+import com.bmwelectric.snake.theme.resolveDayMode
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -121,7 +127,10 @@ fun SnakeAutomotiveApp(initialDemoState: String? = null) {
         ).applyDemoState(initialDemoState, demoScoreTicks = if (seededDemo) DEMO_PLAYING_SCORE_TICKS else 0)
     }
     var gameState by remember { mutableStateOf(controller.state) }
-    var dayMode by remember { mutableStateOf(false) }
+    val themePrefs = remember { createThemePreferences(context) }
+    var manualTheme by remember(themePrefs) { mutableStateOf(loadStoredThemeMode(themePrefs)) }
+    val systemDarkMode = isSystemDarkMode(LocalConfiguration.current)
+    val dayMode = resolveDayMode(manualTheme, systemDarkMode)
     val freezeDemoTicks = initialDemoState.equals("playing", ignoreCase = true)
     val palette = if (dayMode) CockpitPalette.day() else CockpitPalette.dark()
     val focusRequester = remember { FocusRequester() }
@@ -155,7 +164,12 @@ fun SnakeAutomotiveApp(initialDemoState: String? = null) {
                 dayMode = dayMode,
                 palette = palette,
                 focusRequester = focusRequester,
-                onThemeToggle = { dayMode = !dayMode },
+                onThemeToggle = {
+                    // Apply for the current session even if persistence is unavailable.
+                    val selected = if (dayMode) ThemeMode.Dark else ThemeMode.Day
+                    manualTheme = selected
+                    themePrefs.persistThemeMode(selected)
+                },
                 onVehicleState = { updateState { setVehicleState(it) } },
                 onSpeed = { updateState { setSpeedProfile(it) } },
                 onStart = { updateState { start() } },
@@ -243,6 +257,30 @@ private fun SharedPreferences?.persistScoreHistory(scoreHistory: List<ScoreEntry
     this != null && runCatching {
         edit().putString(SCORE_HISTORY_KEY, encodeScoreHistory(scoreHistory)).apply()
     }.isSuccess
+
+private fun createThemePreferences(context: Context): SharedPreferences? = runCatching {
+    context.createDeviceProtectedStorageContext()
+        .getSharedPreferences(THEME_PREFS_NAME, Context.MODE_PRIVATE)
+}.getOrNull()
+
+/**
+ * Returns the stored manual theme, or null when no preference exists, the value is malformed, or
+ * storage cannot be read; null makes the caller follow the system theme.
+ */
+private fun loadStoredThemeMode(prefs: SharedPreferences?): ThemeMode? {
+    if (prefs == null) return null
+    val raw = runCatching { prefs.getString(THEME_PREFERENCE_KEY, null) }.getOrNull() ?: return null
+    return ThemeMode.fromStorage(raw)
+}
+
+/** Best-effort persistence; a failed write must not block the current-session theme switch. */
+private fun SharedPreferences?.persistThemeMode(theme: ThemeMode): Boolean =
+    this != null && runCatching {
+        edit().putString(THEME_PREFERENCE_KEY, theme.storageValue).apply()
+    }.isSuccess
+
+private fun isSystemDarkMode(configuration: Configuration): Boolean =
+    (configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
 @Composable
 private fun SnakeCockpitScreen(
