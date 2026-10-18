@@ -1,6 +1,7 @@
 package com.bmwelectric.snake
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -65,13 +66,23 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bmwelectric.snake.game.BEST_SCORE_KEY
+import com.bmwelectric.snake.game.BOARD_SIZE
 import com.bmwelectric.snake.game.Direction
 import com.bmwelectric.snake.game.Point
 import com.bmwelectric.snake.game.RoundState
+import com.bmwelectric.snake.game.SCORE_HISTORY_KEY
 import com.bmwelectric.snake.game.SnakeGameController
 import com.bmwelectric.snake.game.SnakeGameState
 import com.bmwelectric.snake.game.SpeedProfile
+import com.bmwelectric.snake.game.ScoreEntry
 import com.bmwelectric.snake.game.VehicleState
+import com.bmwelectric.snake.game.decodeScoreHistory
+import com.bmwelectric.snake.game.encodeScoreHistory
+import com.bmwelectric.snake.game.leaderboardRank
+import com.bmwelectric.snake.game.nextEnergyCell
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -89,13 +100,25 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun SnakeAutomotiveApp(initialDemoState: String? = null) {
     val context = LocalContext.current
-    val storageContext = remember { context.createDeviceProtectedStorageContext() }
-    val prefs = remember { storageContext.getSharedPreferences("snake-local-score", Context.MODE_PRIVATE) }
+    val prefs = remember { createScorePreferences(context) }
+    val storedScores = remember(prefs) { loadStoredScores(prefs) }
+    var storageIssue by remember {
+        mutableStateOf(prefs == null || storedScores.readFailed)
+    }
     val controller = remember {
+        val seededDemo = initialDemoState.equals("playing", ignoreCase = true)
         SnakeGameController(
-            bestScore = prefs.getInt(BEST_SCORE_KEY, 0),
-            persistBestScore = { prefs.edit().putInt(BEST_SCORE_KEY, it).apply() },
-        ).applyDemoState(initialDemoState)
+            bestScore = storedScores.bestScore,
+            scoreHistory = storedScores.history,
+            initialEnergy = if (seededDemo) Point(7, 10) else Point(14, 10),
+            persistBestScore = {
+                if (!prefs.persistBestScore(it)) storageIssue = true
+            },
+            persistScoreHistory = {
+                if (!prefs.persistScoreHistory(it)) storageIssue = true
+            },
+            nextEnergyProvider = if (seededDemo) ::demoEnergyAhead else ::nextEnergyCell,
+        ).applyDemoState(initialDemoState, demoScoreTicks = if (seededDemo) DEMO_PLAYING_SCORE_TICKS else 0)
     }
     var gameState by remember { mutableStateOf(controller.state) }
     var dayMode by remember { mutableStateOf(false) }
@@ -128,6 +151,7 @@ fun SnakeAutomotiveApp(initialDemoState: String? = null) {
         ) {
             SnakeCockpitScreen(
                 state = gameState,
+                storageIssue = storageIssue,
                 dayMode = dayMode,
                 palette = palette,
                 focusRequester = focusRequester,
@@ -145,10 +169,18 @@ fun SnakeAutomotiveApp(initialDemoState: String? = null) {
 }
 
 private const val DEMO_STATE_EXTRA = "demo_state"
+private const val SCORE_PREFS_NAME = "snake-local-score"
+private const val LEADERBOARD_ROWS_VISIBLE = 5
+private const val DEMO_PLAYING_SCORE_TICKS = 6
 
-private fun SnakeGameController.applyDemoState(demoState: String?): SnakeGameController {
+private fun SnakeGameController.applyDemoState(demoState: String?, demoScoreTicks: Int): SnakeGameController {
     when (demoState?.lowercase()) {
-        "playing" -> start()
+        "playing" -> {
+            start()
+            // Debug-only: drive real eat-ticks so the frozen Playing frame shows a non-zero
+            // current score. Live ticks stay frozen for the screenshot via freezeDemoTicks.
+            repeat(demoScoreTicks) { tick() }
+        }
         "paused" -> {
             start()
             pauseOrContinue()
@@ -158,9 +190,64 @@ private fun SnakeGameController.applyDemoState(demoState: String?): SnakeGameCon
     return this
 }
 
+/**
+ * Debug-only deterministic energy placement for the frozen Playing screenshot: each new energy
+ * appears one cell right of the snake head, so straight movement eats on every tick.
+ */
+private fun demoEnergyAhead(snake: List<Point>, @Suppress("UNUSED_PARAMETER") current: Point): Point {
+    val head = snake.first()
+    return Point((head.x + 1).coerceAtMost(BOARD_SIZE - 1), head.y)
+}
+
+private data class StoredScores(
+    val bestScore: Int,
+    val history: List<ScoreEntry>,
+    val readFailed: Boolean,
+)
+
+private fun createScorePreferences(context: Context): SharedPreferences? = runCatching {
+    context.createDeviceProtectedStorageContext()
+        .getSharedPreferences(SCORE_PREFS_NAME, Context.MODE_PRIVATE)
+}.getOrNull()
+
+private fun loadStoredScores(prefs: SharedPreferences?): StoredScores {
+    if (prefs == null) return StoredScores(bestScore = 0, history = emptyList(), readFailed = true)
+
+    var readFailed = false
+    val storedBest = runCatching { prefs.getInt(BEST_SCORE_KEY, 0) }.getOrElse {
+        readFailed = true
+        0
+    }
+    val rawHistory = runCatching { prefs.getString(SCORE_HISTORY_KEY, null) }.getOrElse {
+        readFailed = true
+        null
+    }
+    val history = decodeScoreHistory(rawHistory)
+    val storedRows = rawHistory?.lineSequence()?.count { it.isNotBlank() } ?: 0
+    val recoveredCleanly = rawHistory.isNullOrBlank() || storedRows == history.size
+    val bestFromHistory = history.maxOfOrNull { it.score } ?: 0
+
+    return StoredScores(
+        bestScore = maxOf(storedBest.coerceAtLeast(0), bestFromHistory),
+        history = history,
+        readFailed = readFailed || !recoveredCleanly,
+    )
+}
+
+private fun SharedPreferences?.persistBestScore(bestScore: Int): Boolean =
+    this != null && runCatching {
+        edit().putInt(BEST_SCORE_KEY, bestScore.coerceAtLeast(0)).apply()
+    }.isSuccess
+
+private fun SharedPreferences?.persistScoreHistory(scoreHistory: List<ScoreEntry>): Boolean =
+    this != null && runCatching {
+        edit().putString(SCORE_HISTORY_KEY, encodeScoreHistory(scoreHistory)).apply()
+    }.isSuccess
+
 @Composable
 private fun SnakeCockpitScreen(
     state: SnakeGameState,
+    storageIssue: Boolean,
     dayMode: Boolean,
     palette: CockpitPalette,
     focusRequester: FocusRequester,
@@ -223,6 +310,7 @@ private fun SnakeCockpitScreen(
             FunctionRail(palette)
             MainGameArea(
                 state = state,
+                storageIssue = storageIssue,
                 palette = palette,
                 modifier = Modifier
                     .weight(1f)
@@ -326,31 +414,59 @@ private fun FunctionRail(palette: CockpitPalette) {
 }
 
 @Composable
-private fun MainGameArea(state: SnakeGameState, palette: CockpitPalette, modifier: Modifier = Modifier) {
+private fun MainGameArea(
+    state: SnakeGameState,
+    storageIssue: Boolean,
+    palette: CockpitPalette,
+    modifier: Modifier = Modifier,
+) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SafetyBanner(state, palette)
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxSize()
-                .clip(RoundedCornerShape(8.dp))
-                .background(palette.boardSurface)
-                .border(1.dp, palette.line, RoundedCornerShape(8.dp))
-                .padding(16.dp),
-            contentAlignment = Alignment.Center,
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            val boardSide = minOf(maxWidth, maxHeight - 16.dp)
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
-                    .size(boardSide)
-                    .aspectRatio(1f)
-                    .testTag("snake-board")
-                    .semantics {
-                        contentDescription = "Snake board ${state.roundState.name}, score ${state.score}, best ${state.bestScore}"
-                    },
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.boardSurface)
+                    .border(1.dp, palette.line, RoundedCornerShape(8.dp))
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                SnakeBoard(state, palette)
-                BoardOverlay(state, palette)
+                val boardSide = minOf(maxWidth, maxHeight)
+                Box(
+                    modifier = Modifier
+                        .size(boardSide)
+                        .aspectRatio(1f)
+                        .testTag("snake-board")
+                        .semantics {
+                            val rank = state.lastRecordedSequence
+                                ?.let { leaderboardRank(state.scoreHistory, it) }
+                                ?.takeIf { it > 0 }
+                            contentDescription = if (rank != null) {
+                                "Snake board ${state.roundState.name}, score ${state.score}, " +
+                                    "best ${state.bestScore}, rank $rank of ${state.scoreHistory.size}"
+                            } else {
+                                "Snake board ${state.roundState.name}, score ${state.score}, best ${state.bestScore}"
+                            }
+                        },
+                ) {
+                    SnakeBoard(state, palette)
+                    BoardOverlay(state, palette)
+                }
             }
+            LeaderboardPanel(
+                scoreHistory = state.scoreHistory,
+                lastRecordedSequence = state.lastRecordedSequence,
+                storageIssue = storageIssue,
+                palette = palette,
+                modifier = Modifier
+                    .width(276.dp)
+                    .fillMaxHeight(),
+            )
         }
     }
 }
@@ -422,10 +538,20 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGameCell(
 
 @Composable
 private fun BoardOverlay(state: SnakeGameState, palette: CockpitPalette) {
+    val gameOverDetail = run {
+        val rank = state.lastRecordedSequence
+            ?.let { leaderboardRank(state.scoreHistory, it) }
+            ?.takeIf { it > 0 }
+        if (rank != null) {
+            "Score ${state.score.formatScore()}. Rank $rank of ${state.scoreHistory.size}. Best ${state.bestScore.formatScore()}."
+        } else {
+            "Score ${state.score.formatScore()}. Best ${state.bestScore.formatScore()}."
+        }
+    }
     val overlayText = when (state.roundState) {
         RoundState.Ready -> Triple("Parked ready", "Snake is ready", "Start a round when the vehicle remains in Park.")
         RoundState.Paused -> Triple("Paused", "Paused", "Continue, restart, or exit while the vehicle remains parked.")
-        RoundState.GameOver -> Triple("Collision", "Game over", "Score ${state.score}. Best ${state.bestScore}.")
+        RoundState.GameOver -> Triple("Collision", "Game over", gameOverDetail)
         RoundState.DrivingLocked -> Triple(
             "Driving lock",
             "Unavailable while driving",
@@ -454,6 +580,128 @@ private fun BoardOverlay(state: SnakeGameState, palette: CockpitPalette) {
                     Text(overlayText.third, color = palette.muted, fontSize = 18.sp, textAlign = TextAlign.Center)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LeaderboardPanel(
+    scoreHistory: List<ScoreEntry>,
+    lastRecordedSequence: Long?,
+    storageIssue: Boolean,
+    palette: CockpitPalette,
+    modifier: Modifier = Modifier,
+) {
+    Panel(
+        palette,
+        modifier = modifier
+            .testTag("leaderboard")
+            .semantics {
+                contentDescription = "Leaderboard with ${scoreHistory.size} completed rounds"
+            },
+    ) {
+        PanelHeader(
+            "Leaderboard",
+            if (storageIssue) "Local storage limited" else "Local history",
+            palette,
+        )
+        if (scoreHistory.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(96.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.canvas.copy(alpha = 0.38f))
+                    .border(1.dp, palette.line, RoundedCornerShape(8.dp))
+                    .testTag("leaderboard-empty"),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "No completed rounds yet",
+                    color = palette.muted,
+                    fontSize = 17.sp,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        } else {
+            scoreHistory.take(LEADERBOARD_ROWS_VISIBLE).forEachIndexed { index, entry ->
+                LeaderboardRow(
+                    index = index,
+                    entry = entry,
+                    isLatest = entry.sequence == lastRecordedSequence,
+                    palette = palette,
+                )
+                if (index < minOf(scoreHistory.size, LEADERBOARD_ROWS_VISIBLE) - 1) {
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+        }
+        if (storageIssue) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "History was repaired or storage is unavailable.",
+                color = palette.amber,
+                fontSize = 14.sp,
+                lineHeight = 18.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LeaderboardRow(
+    index: Int,
+    entry: ScoreEntry,
+    isLatest: Boolean,
+    palette: CockpitPalette,
+) {
+    val borderColor = if (isLatest) palette.blue else palette.line
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(palette.canvas.copy(alpha = 0.38f))
+            .border(if (isLatest) 1.5.dp else 1.dp, borderColor, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp)
+            .testTag("leaderboard-row-$index")
+            .semantics {
+                contentDescription = "Rank ${index + 1}, score ${entry.score}, " +
+                    "${entry.speedProfile.label} mode, ${formatLeaderboardTime(entry.completedAtMillis)}" +
+                    if (isLatest) ", latest round" else ""
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "#${index + 1}",
+            color = if (index == 0) palette.green else palette.muted,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(32.dp),
+        )
+        Text(
+            entry.score.formatScore(),
+            color = if (index == 0) palette.green else palette.text,
+            fontSize = 24.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+        )
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                entry.speedProfile.label,
+                color = palette.muted,
+                fontSize = 14.sp,
+                maxLines = 1,
+            )
+            Text(
+                formatLeaderboardTime(entry.completedAtMillis),
+                color = palette.muted,
+                fontSize = 12.sp,
+                maxLines = 1,
+            )
         }
     }
 }
@@ -722,6 +970,9 @@ private val RoundState.label: String
     }
 
 private fun Int.formatScore(): String = toString().padStart(3, '0')
+
+private fun formatLeaderboardTime(completedAtMillis: Long): String =
+    SimpleDateFormat("MM/dd HH:mm", Locale.US).format(Date(completedAtMillis))
 
 data class CockpitPalette(
     val canvas: Color,

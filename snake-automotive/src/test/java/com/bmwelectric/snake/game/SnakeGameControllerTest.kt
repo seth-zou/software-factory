@@ -1,6 +1,7 @@
 package com.bmwelectric.snake.game
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -130,5 +131,156 @@ class SnakeGameControllerTest {
         assertEquals(0, controller.state.score)
         assertEquals(Direction.Right, controller.state.nextDirection)
         assertEquals(Point(6, 10), controller.state.snake.first())
+    }
+
+    @Test
+    fun initialBestScoreIsDerivedFromHistoryAndNegativeInputClamped() {
+        val history = listOf(
+            ScoreEntry(score = 60, speedProfile = SpeedProfile.Dynamic, completedAtMillis = 10L, sequence = 1L),
+            ScoreEntry(score = 20, speedProfile = SpeedProfile.Eco, completedAtMillis = 20L, sequence = 2L),
+        )
+
+        val controller = SnakeGameController(bestScore = -5, scoreHistory = history)
+
+        assertEquals(60, controller.state.bestScore)
+        assertEquals(listOf(1L, 2L), controller.state.scoreHistory.map { it.sequence })
+    }
+
+    @Test
+    fun collisionRecordsOneRankedEntryAndPersistsExactlyOnce() {
+        var persistCount = 0
+        var persistedHistory: List<ScoreEntry>? = null
+        val controller = SnakeGameController(
+            persistScoreHistory = {
+                persistCount += 1
+                persistedHistory = it
+            },
+            completedAtProvider = { 5_000L },
+        )
+        controller.start()
+
+        repeat(14) {
+            controller.tick()
+        }
+
+        // Straight run eats the (14,10) energy at tick 8 (+20 Comfort) and hits the wall at tick 14.
+        assertEquals(RoundState.GameOver, controller.state.roundState)
+        assertEquals(20, controller.state.score)
+        assertEquals(1, controller.state.scoreHistory.size)
+        val entry = controller.state.scoreHistory.single()
+        assertEquals(20, entry.score)
+        assertEquals(SpeedProfile.Comfort, entry.speedProfile)
+        assertEquals(5_000L, entry.completedAtMillis)
+        assertEquals(1L, entry.sequence)
+        assertEquals(1L, controller.state.lastRecordedSequence)
+        assertEquals(1, persistCount)
+        assertEquals(controller.state.scoreHistory, persistedHistory)
+        assertTrue(controller.state.statusAnnouncement.contains("Rank 1 of 1"))
+
+        // Further ticks after GameOver must not duplicate the recorded round.
+        controller.tick()
+        controller.tick()
+        assertEquals(1, controller.state.scoreHistory.size)
+        assertEquals(1, persistCount)
+    }
+
+    @Test
+    fun zeroScoreRoundIsStillRecordedOnLeaderboard() {
+        val controller = SnakeGameController(completedAtProvider = { 1_000L })
+        controller.start()
+        // Turn up immediately so the snake crashes into the top wall before reaching energy.
+        controller.inputDirection(Direction.Up)
+        repeat(12) {
+            controller.tick()
+        }
+
+        assertEquals(RoundState.GameOver, controller.state.roundState)
+        assertEquals(0, controller.state.score)
+        assertEquals(1, controller.state.scoreHistory.size)
+        assertEquals(0, controller.state.scoreHistory.single().score)
+    }
+
+    @Test
+    fun repeatedRoundsAppendEntriesAndTiesRankNewestFirst() {
+        var now = 1_000L
+        val controller = SnakeGameController(completedAtProvider = { now })
+        controller.start()
+        repeat(14) { controller.tick() }
+        assertEquals(RoundState.GameOver, controller.state.roundState)
+
+        now = 2_000L
+        controller.restart()
+        repeat(14) { controller.tick() }
+
+        assertEquals(RoundState.GameOver, controller.state.roundState)
+        assertEquals(2, controller.state.scoreHistory.size)
+        // Equal 20-point Comfort rounds: newer completion ranks first.
+        assertEquals(listOf(2L, 1L), controller.state.scoreHistory.map { it.sequence })
+        assertEquals(2L, controller.state.lastRecordedSequence)
+        assertTrue(controller.state.statusAnnouncement.contains("Rank 1 of 2"))
+    }
+
+    @Test
+    fun differentSpeedScoresRankByPointsAndSurviveReadyTransitions() {
+        var now = 1_000L
+        val controller = SnakeGameController(completedAtProvider = { now })
+
+        // Eco round: straight run scores 10.
+        controller.setSpeedProfile(SpeedProfile.Eco)
+        controller.start()
+        repeat(14) { controller.tick() }
+        assertEquals(10, controller.state.score)
+
+        // Exit to Ready (history retained), switch to Dynamic, score 30 in the next round.
+        controller.exit()
+        now = 2_000L
+        controller.setSpeedProfile(SpeedProfile.Dynamic)
+        controller.start()
+        repeat(14) { controller.tick() }
+
+        assertEquals(30, controller.state.score)
+        assertEquals(listOf(30, 10), controller.state.scoreHistory.map { it.score })
+        assertEquals(
+            listOf(SpeedProfile.Dynamic, SpeedProfile.Eco),
+            controller.state.scoreHistory.map { it.speedProfile },
+        )
+        assertEquals(30, controller.state.bestScore)
+    }
+
+    @Test
+    fun historySurvivesDrivingLockAndReturnToParked() {
+        val controller = SnakeGameController(completedAtProvider = { 1_000L })
+        controller.start()
+        repeat(14) { controller.tick() }
+        assertEquals(1, controller.state.scoreHistory.size)
+
+        controller.setVehicleState(VehicleState.Driving)
+        assertEquals(RoundState.DrivingLocked, controller.state.roundState)
+        assertEquals(1, controller.state.scoreHistory.size)
+
+        controller.setVehicleState(VehicleState.Parked)
+        assertEquals(RoundState.Ready, controller.state.roundState)
+        assertEquals(0, controller.state.score)
+        assertEquals(1, controller.state.scoreHistory.size)
+        assertEquals(20, controller.state.bestScore)
+        assertNull(controller.state.lastRecordedSequence)
+    }
+
+    @Test
+    fun exitingMidRoundDoesNotRecordHistory() {
+        var persistCount = 0
+        val controller = SnakeGameController(
+            persistScoreHistory = { persistCount += 1 },
+            nextEnergyProvider = { _, _ -> Point(0, 0) },
+        )
+        controller.start()
+        repeat(3) { controller.tick() }
+        assertEquals(0, controller.state.scoreHistory.size)
+
+        controller.exit()
+
+        assertEquals(RoundState.Ready, controller.state.roundState)
+        assertEquals(0, controller.state.scoreHistory.size)
+        assertEquals(0, persistCount)
     }
 }

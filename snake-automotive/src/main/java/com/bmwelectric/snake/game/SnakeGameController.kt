@@ -37,6 +37,8 @@ data class SnakeGameState(
     val speedProfile: SpeedProfile = SpeedProfile.Comfort,
     val score: Int = 0,
     val bestScore: Int = 0,
+    val scoreHistory: List<ScoreEntry> = emptyList(),
+    val lastRecordedSequence: Long? = null,
     val direction: Direction = Direction.Right,
     val nextDirection: Direction = Direction.Right,
     val snake: List<Point> = initialSnake(),
@@ -55,10 +57,20 @@ data class SnakeGameState(
 
 class SnakeGameController(
     bestScore: Int = 0,
+    scoreHistory: List<ScoreEntry> = emptyList(),
+    initialEnergy: Point = Point(14, 10),
     private val persistBestScore: (Int) -> Unit = {},
+    private val persistScoreHistory: (List<ScoreEntry>) -> Unit = {},
+    private val completedAtProvider: () -> Long = { System.currentTimeMillis() },
     private val nextEnergyProvider: (List<Point>, Point) -> Point = ::nextEnergyCell,
 ) {
-    var state: SnakeGameState = SnakeGameState(bestScore = bestScore.coerceAtLeast(0))
+    private val initialEnergyPoint: Point = initialEnergy
+
+    var state: SnakeGameState = SnakeGameState(
+        bestScore = maxOf(bestScore.coerceAtLeast(0), scoreHistory.maxOfOrNull { it.score } ?: 0),
+        scoreHistory = rankScoreHistory(scoreHistory),
+        energy = initialEnergyPoint,
+    )
         private set
 
     fun setVehicleState(vehicleState: VehicleState) {
@@ -71,6 +83,8 @@ class SnakeGameController(
             VehicleState.Parked -> if (state.roundState == RoundState.DrivingLocked || state.vehicleState == VehicleState.Driving) {
                 readyState(
                     bestScore = state.bestScore,
+                    scoreHistory = state.scoreHistory,
+                    energy = initialEnergyPoint,
                     speedProfile = state.speedProfile,
                     announcement = "Parked. Game controls available.",
                 )
@@ -90,6 +104,8 @@ class SnakeGameController(
         if (!state.canStart) return
         state = newRoundState(
             bestScore = state.bestScore,
+            scoreHistory = state.scoreHistory,
+            energy = initialEnergyPoint,
             speedProfile = state.speedProfile,
             announcement = "Snake started.",
         )
@@ -99,6 +115,8 @@ class SnakeGameController(
         if (!state.canRestart) return
         state = newRoundState(
             bestScore = state.bestScore,
+            scoreHistory = state.scoreHistory,
+            energy = initialEnergyPoint,
             speedProfile = state.speedProfile,
             announcement = "Snake restarted.",
         )
@@ -125,6 +143,8 @@ class SnakeGameController(
         } else {
             readyState(
                 bestScore = state.bestScore,
+                scoreHistory = state.scoreHistory,
+                energy = initialEnergyPoint,
                 speedProfile = state.speedProfile,
                 announcement = "Snake exited.",
             )
@@ -146,10 +166,22 @@ class SnakeGameController(
         val hitBody = head in bodyWithoutTail
 
         if (hitWall || hitBody) {
+            val recordedEntry = ScoreEntry(
+                score = state.score.coerceAtLeast(0),
+                speedProfile = state.speedProfile,
+                completedAtMillis = completedAtProvider().coerceAtLeast(0L),
+                sequence = nextScoreSequence(state.scoreHistory),
+            )
+            val rankedHistory = rankScoreHistory(state.scoreHistory + recordedEntry)
+            persistScoreHistory(rankedHistory)
+            val rank = leaderboardRank(rankedHistory, recordedEntry.sequence)
             state = state.copy(
                 roundState = RoundState.GameOver,
                 direction = direction,
-                statusAnnouncement = "Collision. Game over. Score ${state.score}. Best ${state.bestScore}.",
+                scoreHistory = rankedHistory,
+                lastRecordedSequence = recordedEntry.sequence,
+                statusAnnouncement = "Collision. Game over. Score ${state.score}. " +
+                    "Rank $rank of ${rankedHistory.size}. Best ${state.bestScore}.",
             )
             return
         }
@@ -176,6 +208,8 @@ class SnakeGameController(
 
 private fun readyState(
     bestScore: Int,
+    scoreHistory: List<ScoreEntry>,
+    energy: Point,
     speedProfile: SpeedProfile,
     announcement: String,
 ): SnakeGameState = SnakeGameState(
@@ -183,11 +217,15 @@ private fun readyState(
     roundState = RoundState.Ready,
     speedProfile = speedProfile,
     bestScore = bestScore,
+    scoreHistory = scoreHistory,
+    energy = energy,
     statusAnnouncement = announcement,
 )
 
 private fun newRoundState(
     bestScore: Int,
+    scoreHistory: List<ScoreEntry>,
+    energy: Point,
     speedProfile: SpeedProfile,
     announcement: String,
 ): SnakeGameState = SnakeGameState(
@@ -195,6 +233,8 @@ private fun newRoundState(
     roundState = RoundState.Playing,
     speedProfile = speedProfile,
     bestScore = bestScore,
+    scoreHistory = scoreHistory,
+    energy = energy,
     statusAnnouncement = announcement,
 )
 
@@ -219,7 +259,7 @@ private fun Direction.isOpposite(other: Direction): Boolean = when (this) {
     Direction.Right -> other == Direction.Left
 }
 
-private fun nextEnergyCell(snake: List<Point>, current: Point): Point {
+internal fun nextEnergyCell(snake: List<Point>, current: Point): Point {
     val occupied = snake.toSet()
     val start = ((current.y * BOARD_SIZE) + current.x + 37).floorMod(BOARD_SIZE * BOARD_SIZE)
     for (offset in 0 until BOARD_SIZE * BOARD_SIZE) {
