@@ -13,8 +13,13 @@ This repository is a small Gradle Android project for a BMW Electric Android Coc
 - Package/application id: `com.bmwelectric.snake`.
 - Main UI: `snake-automotive/src/main/java/com/bmwelectric/snake/MainActivity.kt`.
 - Game state machine: `snake-automotive/src/main/java/com/bmwelectric/snake/game/SnakeGameController.kt`.
+- Score history model, ranking, and text persistence codec: `snake-automotive/src/main/java/com/bmwelectric/snake/game/ScoreHistory.kt`.
+- Day/Dark theme mode parsing and resolution: `snake-automotive/src/main/java/com/bmwelectric/snake/theme/ThemeMode.kt`.
 - JVM tests: `snake-automotive/src/test/java/com/bmwelectric/snake/game/SnakeGameControllerTest.kt`.
+- Score history and theme JVM tests: `snake-automotive/src/test/java/com/bmwelectric/snake/game/ScoreHistoryTest.kt`, `snake-automotive/src/test/java/com/bmwelectric/snake/theme/ThemeModeTest.kt`.
 - Compose instrumentation tests: `snake-automotive/src/androidTest/java/com/bmwelectric/snake/SnakeAutomotiveUiTest.kt`.
+- Emulator screenshot evidence: `docs/screenshots/score-leaderboard/` and `docs/screenshots/theme-switching/`.
+- No CI workflow is currently checked in; use the local Gradle wrapper commands below as the source of truth.
 
 ## First Read Path
 
@@ -26,8 +31,11 @@ Before editing, read these files in order:
 4. `snake-automotive/build.gradle.kts`
 5. `snake-automotive/src/main/AndroidManifest.xml`
 6. `snake-automotive/src/main/java/com/bmwelectric/snake/game/SnakeGameController.kt`
-7. `snake-automotive/src/main/java/com/bmwelectric/snake/MainActivity.kt`
-8. Relevant unit/UI tests under `snake-automotive/src/test` and `snake-automotive/src/androidTest`
+7. `snake-automotive/src/main/java/com/bmwelectric/snake/game/ScoreHistory.kt`
+8. `snake-automotive/src/main/java/com/bmwelectric/snake/theme/ThemeMode.kt`
+9. `snake-automotive/src/main/java/com/bmwelectric/snake/MainActivity.kt`
+10. Relevant unit/UI tests under `snake-automotive/src/test` and `snake-automotive/src/androidTest`
+11. Screenshot evidence READMEs under `docs/screenshots/` when touching UI, leaderboard, theme, or emulator validation guidance
 
 For UI/design changes, also read the workspace design system at `knowledge/design-system/bmw-electric-android-cockpit/DESIGN.md` when it is available.
 
@@ -66,7 +74,9 @@ Useful focused commands:
 ## Kotlin and Compose Rules
 
 - Keep business rules in `SnakeGameController` when possible; keep Compose UI as a view/controller layer.
-- Preserve deterministic state-machine behavior and focused tests for safety rules.
+- Keep score history ranking, encoding, decoding, and bounds in `ScoreHistory.kt`; do not duplicate leaderboard ordering in Compose.
+- Keep theme storage parsing and system/manual resolution in `ThemeMode.kt`; Compose should consume the resolved mode.
+- Preserve deterministic state-machine behavior and focused tests for safety rules, history ranking, and theme fallback.
 - Use Compose semantics, `contentDescription`, visible focus, disabled states, stable dimensions, and keyboard/touch support.
 - Maintain landscape-first cockpit layout. Do not introduce marketing pages, decorative animation, or dense driving-mode text.
 - Keep text and controls within stable containers at automotive display sizes.
@@ -81,6 +91,18 @@ The UI must stay aligned with the BMW Electric Android Cockpit design system:
 - Driving/cockpit controls should target the preferred `72.dp` touch size where practical and never regress below the design system minimum touch target.
 - Maintain dark and day mode support, legible contrast, stable score/value areas, and reduced-motion-friendly behavior.
 - Safety and locked states must use persistent, glanceable banners rather than transient messages.
+- The theme toggle label names the target theme (`Day mode` while Dark is active, `Dark mode` while Day is active); preserve this behavior unless tests and screenshot evidence are deliberately updated.
+
+## Persistence and Local Data
+
+The app intentionally stores only local, device-protected preferences so it can run under Android Automotive locked-user conditions:
+
+- Best score: `snake-local-score` preferences, key `bmwSnakeBestScore`.
+- Score history: `snake-local-score` preferences, key `bmwSnakeScoreHistory`, newline rows encoded as `score|SpeedProfile|completedAtMillis|sequence`.
+- Manual theme: `snake-local-theme` preferences, key `bmwSnakeThemePreference`, values `day` or `dark`.
+- Malformed score history rows must be skipped without crashing; malformed or missing theme values must fall back to following the Android system theme.
+- Score history is ranked by score descending, then completed time descending, then sequence descending; it is capped at 10 persisted rows, with five rows visible in the cockpit panel.
+- Failed preference reads/writes should surface a storage warning where applicable but must not block current-session play or theme switching.
 
 ## Safety and State Machine Invariants
 
@@ -92,8 +114,16 @@ Driving safety is a hard gate:
 - Reverse direction input must be ignored; rapid legal input must remain stable.
 - Pause must freeze ticks; continue must resume ticks.
 - Collisions and best-score persistence must remain covered by JVM tests.
+- Collision-ended rounds, including zero-score collisions, must be recorded exactly once. Exiting mid-round must not record history.
+- Repeated equal-score rounds must rank newest first and keep a monotonic sequence id.
+- Theme toggling must not start, pause, resume, restart, exit, or otherwise mutate a round, including while `DrivingLocked`.
 
-When changing these behaviors, update `SnakeGameControllerTest` in the same commit.
+When changing these behaviors, update the focused tests in the same commit:
+
+- State machine and driving safety: `SnakeGameControllerTest`.
+- Leaderboard ranking, codecs, and malformed persistence handling: `ScoreHistoryTest`.
+- Theme parsing and system/manual resolution: `ThemeModeTest`.
+- Compose semantics, locked controls, and theme UI behavior: `SnakeAutomotiveUiTest`.
 
 ## Automotive Runtime and Screenshots
 
@@ -145,6 +175,8 @@ adb shell am start --display <launch-display-id> --activity-clear-task --user 0 
 ```
 
 `demo_state=playing` freezes ticks to keep Playing stable for screenshots. These extras must remain guarded by `ApplicationInfo.FLAG_DEBUGGABLE`; release/non-debuggable builds must ignore them.
+
+Committed screenshot artifacts are allowed only when the task explicitly asks for visual evidence or UI validation. Store durable evidence under the existing `docs/screenshots/<feature>/` folders with a README that records emulator image, launch/capture commands, display-id discovery, file sizes, SHA-256 hashes, visual inspection notes, and any connected-test caveat. Do not commit transient emulator logs, APKs, Gradle reports, or screenshots outside those evidence folders.
 
 ## Git Hygiene
 
